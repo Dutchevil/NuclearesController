@@ -139,14 +139,11 @@ internal class Program {
 
                 float actualDesiredCoreTemp = desiredCoreTemp;
                 bool actualDesiredCoreTempReactivityLimited = false;
-                if (Math.Abs(reactivityzerobased) < 1)
-                {
-                    (actualDesiredCoreTemp, actualDesiredCoreTempReactivityLimited) = (desiredCoreTemp, false);
-                }
-                else
-                {
-                    var newTemp = desiredCoreTemp - 500 * Math.Sign(reactivityzerobased);
+                if (Math.Abs(reactivityzerobased) > 3.5) { // -5 to 5
+                    var newTemp = desiredCoreTemp - 250 * Math.Sign(reactivityzerobased);
                     (actualDesiredCoreTemp, actualDesiredCoreTempReactivityLimited) = (newTemp, true);
+                } else {
+                    (actualDesiredCoreTemp, actualDesiredCoreTempReactivityLimited) = (desiredCoreTemp, false);
                 }
                 var newRodsPos = coreTempToRodsPid.Step(currentTimestamp, actualDesiredCoreTemp, coreTempCurrent, reactivityzerobased);
                 SetVariable("RODS_POS_ORDERED", newRodsPos);
