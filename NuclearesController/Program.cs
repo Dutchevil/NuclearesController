@@ -9,8 +9,9 @@ internal class Program {
     private static HttpClient hc = new HttpClient() { BaseAddress = new($"http://localhost:{PORT}/") };
     private static readonly object logObj = new();
 
-    const float desiredCoreTemp = 360f;
-
+    private const float desiredCoreTemp = 360f;
+    private const double maxTargetReactivity = 2;
+    private const double reactivitySlopeLengthDegrees = 25;
     public static void Log(string msg, LogLevel level) {
         lock (logObj) {
             var fg = Console.ForegroundColor;
@@ -46,8 +47,8 @@ internal class Program {
     internal static readonly string[] secLevelVariables = [.. Enumerable.Range(0, 3).Select(x => $"COOLANT_SEC_{x}_VOLUME")];
     internal static readonly string[] primaryPumpSpeedVariables = [.. Enumerable.Range(0, 3).Select(x => $"COOLANT_CORE_CIRCULATION_PUMP_{x}_SPEED")];
 
-    internal static readonly string[] observedVariables = ["CORE_TEMP","RODS_POS_ORDERED", "AUX_IODINE_GENERATION", "AUX_IODINE_CUMULATIVE", "AUX_XENON_GENERATION",
-        "AUX_XENON_CUMULATIVE", "AUX_FACTOR", ..generatorVariables,..secLevelVariables];
+    internal static readonly string[] observedVariables = ["CORE_TEMP"];//, "RODS_POS_ORDERED"];//, "AUX_IODINE_GENERATION", "AUX_IODINE_CUMULATIVE", "AUX_XENON_GENERATION",
+        //"AUX_XENON_CUMULATIVE"];//, "AUX_FACTOR", ..generatorVariables,..secLevelVariables];
     internal static readonly string[] deltaVariablesToObserve = ["CORE_TEMP"];//, "RODS_POS_ORDERED"];//, "AUX_IODINE_GENERATION", "AUX_FACTOR", .. generatorVariables, .. secLevelVariables];
     internal static readonly string[] variablesToPaste = ["AUX_FACTOR", .. generatorVariables, .. primaryPumpSpeedVariables, "CORE_TEMP"];
 
@@ -78,6 +79,7 @@ internal class Program {
 
             const float absorptionCapacity = 10000;
             const float targetPowerOutput = (absorptionCapacity / 2) * (0.75f);
+            var coshCorrectionFactor = maxTargetReactivity / Math.Log(Math.Cosh(maxTargetReactivity));
 
             await WaitForWebserverAvailableAsync();
             Console.Clear();
@@ -91,7 +93,7 @@ internal class Program {
 
             double targetCoreTemp = await GetVariableAsync<float>("CORE_TEMP");
             double rodStartPercentage = await GetVariableAsync<float>("RODS_POS_ACTUAL");
-            var coreTempToRodsPid = new PID(0.1, 0.025, 1.2, rodStartPercentage, true, (0, 100));
+            var reactivityToRodsPid = new PID(0.5, 0.075, 0, rodStartPercentage, true, (0, 100));
 
             //const float targetSecondaryLevel = 3500f;
             //var secondaryLevelPids = Enumerable.Range(0, 3).Select(async i => new PID(0.05, 0.0005, 0, await GetVariableAsync<float>($"COOLANT_SEC_CIRCULATION_PUMP_{i}_ORDERED_SPEED"), false, (0, 100))).Select(x => x.Result).ToArray();
@@ -136,18 +138,21 @@ internal class Program {
 
                 if (lastOpMode != currOpMode) {
                     lastOpMode = currOpMode;
-                    coreTempToRodsPid.Reset(await GetVariableAsync<float>("RODS_POS_ACTUAL"));
+                    reactivityToRodsPid.Reset(await GetVariableAsync<float>("RODS_POS_ACTUAL"));
                 }
 
-                float actualDesiredCoreTemp = desiredCoreTemp;
-                bool actualDesiredCoreTempReactivityLimited = false;
-                if (Math.Abs(reactivityzerobased) > 3.5) { // -5 to 5
-                    var newTemp = desiredCoreTemp - 250 * Math.Sign(reactivityzerobased);
-                    (actualDesiredCoreTemp, actualDesiredCoreTempReactivityLimited) = (newTemp, true);
-                } else {
-                    (actualDesiredCoreTemp, actualDesiredCoreTempReactivityLimited) = (desiredCoreTemp, false);
-                }
-                var newRodsPos = coreTempToRodsPid.Step(currentTimestamp, actualDesiredCoreTemp, coreTempCurrent, reactivityzerobased);
+                //float actualDesiredCoreTemp = desiredCoreTemp;
+                //bool actualDesiredCoreTempReactivityLimited = false;
+                //if (Math.Abs(reactivityzerobased) > 3.5) { // -5 to 5
+                //    var newTemp = desiredCoreTemp - 250 * Math.Sign(reactivityzerobased);
+                //    (actualDesiredCoreTemp, actualDesiredCoreTempReactivityLimited) = (newTemp, true);
+                //} else {
+                //    (actualDesiredCoreTemp, actualDesiredCoreTempReactivityLimited) = (desiredCoreTemp, false);
+                //}
+                var coreTempError = coreTempCurrent - desiredCoreTemp;
+                //var desiredReactivity = Math.CopySign(Math.Clamp(Math.Log(Math.Cosh(Math.Abs(coreTempError/(reactivitySlopeLengthDegrees/2)))) * coshCorrectionFactor, 0, maxTargetReactivity), -coreTempError);
+                var desiredReactivity = Math.Clamp(-coreTempError, -reactivitySlopeLengthDegrees, reactivitySlopeLengthDegrees) / reactivitySlopeLengthDegrees * maxTargetReactivity;
+                var newRodsPos = reactivityToRodsPid.Step(currentTimestamp, desiredReactivity, reactivityzerobased);
                 SetVariable("RODS_POS_ORDERED", newRodsPos);
                 //for (int i = 0; i < 3; i++)
                 //{
@@ -185,7 +190,7 @@ internal class Program {
 
                 var deltaDict = deltaHandler.Tick(await GetDeltaPrecursorDictAsync());
 
-                if (setIntervalRemaining-- <= 0 || Math.Abs(lastRodSet - newRodsPos) > 0.4) {
+                if (true || setIntervalRemaining-- <= 0 || Math.Abs(lastRodSet - newRodsPos) > 0.4) {
                     setIntervalRemaining = setInterval;
                     lastRodSet = newRodsPos;
                     foreach (var (k, v) in variablesToSet) {
@@ -197,15 +202,16 @@ internal class Program {
                 Console.WriteLine("");
                 Console.WriteLine("Cool reactor controller :)))))\n");
                 Console.WriteLine($"OPERATION MODE: {opModeSelStr} --> {currOpMode.ToString().ToUpperInvariant()}          ");
+                Console.WriteLine($"Desired/actual reactivity: {desiredReactivity:N3}/{reactivityzerobased:N3}");
                 if (variablesToSet.ContainsKey("RODS_POS_ORDERED")) {
                     Console.WriteLine($"New rod level: {variablesToSet["RODS_POS_ORDERED"]}" + padright);
-                    if (actualDesiredCoreTempReactivityLimited) {
-                        Warn("Large reactivity change detected. Slowing rod movement.");
-                    }
+                    //if (actualDesiredCoreTempReactivityLimited) {
+                    //    Warn("Large reactivity change detected. Slowing rod movement.");
+                    //}
                 }
                 /*Console.WriteLine($"Ordered secondary pumpspeeds A/B/C: {string.Join('/', Enumerable.Range(0, 3).Select(i => variablesToSet[$"COOLANT_SEC_CIRCULATION_PUMP_{i}_ORDERED_SPEED"]))}" + "      ");
                 Console.WriteLine($"Ordered condenser speed: {variablesToSet["CONDENSER_CIRCULATION_PUMP_ORDERED_SPEED"]}" + padright);*/
-                //Console.WriteLine($"Additional variables:{padright}\n" + dictToString(observedVariables.ToDictionary(x => x, x => GetVariableAsync<float>(x).Result)));
+                Console.WriteLine($"Additional variables:{padright}\n" + dictToString(observedVariables.ToDictionary(x => x, x => GetVariableAsync<float>(x).Result)));
                 Console.WriteLine(padright + padright + padright);
                 var ctReached = Math.Abs(coreTempCurrent - desiredCoreTemp) < 1 && Math.Abs(reactivityzerobased) < 0.5;
                 Console.ForegroundColor = ctReached ? ConsoleColor.Green : ConsoleColor.Yellow;
