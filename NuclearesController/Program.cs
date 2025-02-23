@@ -8,6 +8,9 @@ internal class Program {
     private static readonly TimeSpan requestTimeout = TimeSpan.FromSeconds(2);
     private static HttpClient hc = new HttpClient() { BaseAddress = new($"http://localhost:{PORT}/") };
     private static readonly object logObj = new();
+
+    const float desiredCoreTemp = 360f;
+
     public static void Log(string msg, LogLevel level) {
         lock (logObj) {
             var fg = Console.ForegroundColor;
@@ -87,9 +90,8 @@ internal class Program {
             string padright = new string(' ', 32);
 
             double targetCoreTemp = await GetVariableAsync<float>("CORE_TEMP");
-            const float desiredCoreTemp = 360f;
             double rodStartPercentage = await GetVariableAsync<float>("RODS_POS_ACTUAL");
-            var coreTempToRodsPid = new PID(0.2, 0.05, 0.5, rodStartPercentage, true, (0, 100));
+            var coreTempToRodsPid = new PID(0.1, 0.025, 1.2, rodStartPercentage, true, (0, 100));
 
             //const float targetSecondaryLevel = 3500f;
             //var secondaryLevelPids = Enumerable.Range(0, 3).Select(async i => new PID(0.05, 0.0005, 0, await GetVariableAsync<float>($"COOLANT_SEC_CIRCULATION_PUMP_{i}_ORDERED_SPEED"), false, (0, 100))).Select(x => x.Result).ToArray();
