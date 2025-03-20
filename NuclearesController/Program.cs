@@ -129,7 +129,7 @@ internal class Program {
                 variablesToSet.Clear();
                 var coreTempCurrent = await GetVariableAsync<float>("CORE_TEMP");
                 var reactivityzerobased = await GetVariableAsync<float>("CORE_STATE_CRITICALITY");
-                var opModeSelStr = await GetVariableAsync<string>("OPERATION_MODE");
+                var opModeSelStr = await GetVariableAsync<string>("CORE_OPERATION_MODE");
                 if (opModeSelStr == "SHUTDOWN")
                     currOpMode = OPMode.Shutdown;
                 else
