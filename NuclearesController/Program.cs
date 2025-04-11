@@ -40,7 +40,13 @@ internal class Program {
         return rv2;
     }
 
-    public static async Task SetVariableAsync(string varname, object value) => await hc.PostAsync($"?variable={varname}&value={value.ToString().Replace('.', ',')}", null);
+    public static async Task SetVariableAsync(string varname, object value) {
+        string strVal = (value?.ToString() ?? "null").Replace('.', ',');
+        var resp = await hc.PostAsync($"?variable={varname}&value={strVal}", null);
+        if (!resp.IsSuccessStatusCode) {
+            throw new Exception($"Non success status code for setting variable {varname} to {strVal}");
+        }
+    }
 
     private static int currentTimestamp = 0;
     internal static readonly string[] generatorVariables = [.. Enumerable.Range(0, 3).Select(x => $"GENERATOR_{x}_KW")];
@@ -153,7 +159,7 @@ internal class Program {
                 //var desiredReactivity = Math.CopySign(Math.Clamp(Math.Log(Math.Cosh(Math.Abs(coreTempError/(reactivitySlopeLengthDegrees/2)))) * coshCorrectionFactor, 0, maxTargetReactivity), -coreTempError);
                 var desiredReactivity = Math.Clamp(-coreTempError, -reactivitySlopeLengthDegrees, reactivitySlopeLengthDegrees) / reactivitySlopeLengthDegrees * maxTargetReactivity;
                 var newRodsPos = reactivityToRodsPid.Step(currentTimestamp, desiredReactivity, reactivityzerobased);
-                SetVariable("RODS_POS_ORDERED", newRodsPos);
+                SetVariable("RODS_ALL_POS_ORDERED", newRodsPos);
                 for (int i = 0; i < 3; i++) {
                     var currSecCoolant = await GetVariableAsync<float>($"COOLANT_SEC_{i}_VOLUME");
                     SetVariable($"COOLANT_SEC_CIRCULATION_PUMP_{i}_ORDERED_SPEED", secondaryLevelPids[i].Step(currentTimestamp, targetSecondaryLevel, currSecCoolant).ToString("N2"));
@@ -173,7 +179,7 @@ internal class Program {
 
 
                 if (currOpMode is OPMode.Shutdown or OPMode.Startup) {
-                    variablesToSet.Remove("RODS_POS_ORDERED");
+                    variablesToSet.Remove("RODS_ALL_POS_ORDERED");
                 }
 
                 var deltaDict = deltaHandler.Tick(await GetDeltaPrecursorDictAsync());
