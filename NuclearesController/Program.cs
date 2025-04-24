@@ -9,7 +9,7 @@ internal class Program {
     private static HttpClient hc = new HttpClient() { BaseAddress = new($"http://localhost:{PORT}/") };
     private static readonly object logObj = new();
 
-    private const float desiredCoreTemp = 380;
+    private const float desiredCoreTemp = 400;
     private const double maxTargetReactivity = 2;
     private const double reactivitySlopeLengthDegrees = 25;
     public static void Log(string msg, LogLevel level) {
@@ -160,7 +160,7 @@ internal class Program {
                 var desiredReactivity = Math.Clamp(-coreTempError, -reactivitySlopeLengthDegrees, reactivitySlopeLengthDegrees) / reactivitySlopeLengthDegrees * maxTargetReactivity;
                 var newRodsPos = reactivityToRodsPid.Step(currentTimestamp, desiredReactivity, reactivityzerobased);
                 SetVariable("RODS_ALL_POS_ORDERED", newRodsPos);
-                for (int i = 0; i < 3; i++) {
+                for (int i = 0; i < 0; i++) {
                     var currSecCoolant = await GetVariableAsync<float>($"COOLANT_SEC_{i}_VOLUME");
                     SetVariable($"COOLANT_SEC_CIRCULATION_PUMP_{i}_ORDERED_SPEED", secondaryLevelPids[i].Step(currentTimestamp, targetSecondaryLevel, currSecCoolant).ToString("N2"));
                 }
@@ -197,8 +197,8 @@ internal class Program {
                 Console.WriteLine("Cool reactor controller :)))))\n");
                 Console.WriteLine($"OPERATION MODE: {opModeSelStr} --> {currOpMode.ToString().ToUpperInvariant()}          ");
                 Console.WriteLine($"Desired/actual reactivity: {desiredReactivity:N3}/{reactivityzerobased:N3}");
-                if (variablesToSet.ContainsKey("RODS_POS_ORDERED")) {
-                    Console.WriteLine($"New rod level: {variablesToSet["RODS_POS_ORDERED"]}" + padright);
+                if (variablesToSet.ContainsKey("RODS_ALL_POS_ORDERED")) {
+                    Console.WriteLine($"New rod level: {variablesToSet["RODS_ALL_POS_ORDERED"]}" + padright);
                     //if (actualDesiredCoreTempReactivityLimited) {
                     //    Warn("Large reactivity change detected. Slowing rod movement.");
                     //}
