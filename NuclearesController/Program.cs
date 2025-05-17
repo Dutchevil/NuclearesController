@@ -6,7 +6,7 @@ namespace NuclearesController;
 internal class Program
 {
     private const int PORT = 8785;
-    private static readonly TimeSpan requestTimeout = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan requestTimeout = TimeSpan.FromSeconds(2);
     private static HttpClient hc = new HttpClient() { BaseAddress = new($"http://localhost:{PORT}/") };
     private static readonly object logObj = new();
 
@@ -17,6 +17,18 @@ internal class Program
     private const float targetReactivity = 0.10f;
     private static int currentRodBankIndex = 0;
     private const float desiredCondenserTemp = 65f;
+
+    // for smoothing iodineGen
+    private static readonly Queue<float> iodineGenHistory = new();
+    private const int IodineAvgLength = 10;
+
+    // for boron‑PID control
+    private static PID? boronPid;
+    private const float targetBoronPpm = 3300f;
+
+    // cooldown so we only recalc boron every N ticks
+    private static int boronEvalCooldown = 0;
+    private const int BoronEvalInterval = 5;
 
     public static void Log(string msg, LogLevel level)
     {
@@ -107,6 +119,8 @@ internal class Program
                 (0, 100)
             );
             var condenserPumpSpeedPid = new PID(0.00005, 0.05, 0.01, await GetVariableAsync<float>("CONDENSER_CIRCULATION_PUMP_ORDERED_SPEED"), true, (0, 100));
+            float initialBoron = await GetVariableAsync<float>("CHEM_BORON_PPM");
+            boronPid = new PID(0.05, 0.001, 0.01, initialBoron, true, (-50, 50));
 
             const int setInterval = 4;
             int setIntervalRemaining = 0;
@@ -120,6 +134,10 @@ internal class Program
                 float temp = await GetVariableAsync<float>("CORE_TEMP");
                 float xenon = await GetVariableAsync<float>("CORE_XENON_CUMULATIVE");
                 float iodine = await GetVariableAsync<float>("CORE_IODINE_CUMULATIVE");
+                iodineGenHistory.Enqueue(iodine);
+             if (iodineGenHistory.Count > IodineAvgLength)
+                    iodineGenHistory.Dequeue();
+                float avgIodineGen = iodineGenHistory.Average();
                 float reactivity = await GetVariableAsync<float>("CORE_STATE_CRITICALITY");
                 float condenserTemp = await GetVariableAsync<float>("CONDENSER_TEMPERATURE");
                 string opMode = await GetVariableAsync<string>("CORE_OPERATION_MODE");
@@ -199,6 +217,49 @@ internal class Program
                 {
                     setIntervalRemaining = setInterval;
                     lastRodSet = newRodsPos;
+                }
+
+                if (--boronEvalCooldown <= 0)
+                {
+                    boronEvalCooldown = BoronEvalInterval;
+
+                    float boronPpm = await GetVariableAsync<float>("CHEM_BORON_PPM");
+                    float doseRate = 0f, filterRate = 0f;
+                    bool ruleUsed = false;
+
+                    if (temp < 300 && reactivity < 0.01f)
+                    {
+                        filterRate = 50f;
+                        ruleUsed = true;
+                        Warn("Cold reactor: purging boron.");
+                    }
+                    else if (avgIodineGen > 1.2f && temp > 320 && boronPpm < 4500f)
+                    {
+                        doseRate = MathF.Min((avgIodineGen - 1.2f) * 50f, 50f);
+                        ruleUsed = true;
+                        Info($"Dosing boron due to high iodine generation: {avgIodineGen:N2}");
+                    }
+
+                    if (boronPpm > 5000)
+                    {
+                        doseRate = 0f;
+                        filterRate = 50f;
+                        ruleUsed = true;
+                        Warn("Boron ppm too high — filtering excess.");
+                    }
+
+                    if (!ruleUsed)
+                    {
+                        float boronOut = (float)boronPid.Step(currentTimestamp, targetBoronPpm, boronPpm);
+                        doseRate = Math.Clamp(boronOut, 0f, 50f);
+                        filterRate = Math.Clamp(-boronOut, 0f, 50f);
+
+                        Console.WriteLine($"[BORON] PPM: {boronPpm:N1} | PID Out: {boronOut:N2} | Dose: {doseRate:N1} | Filter: {filterRate:N1}");
+                        Console.WriteLine($"[IODINE AVG] {avgIodineGen:N2} | Reactivity: {reactivity:N2} | Temp: {temp:N1}");
+                    }
+
+                    await SetVariableAsync("CHEM_BORON_DOSAGE_ORDERED_RATE", doseRate);
+                    await SetVariableAsync("CHEM_BORON_FILTER_ORDERED_SPEED", filterRate);
                 }
 
                 Console.WriteLine($"Temp: {temp:N1} °C | Reactivity: {reactivity:N2} | Rods: {newRodsPos:N1}% | Bank: {currentRodBankIndex}");
