@@ -73,3 +73,14 @@ Xenon: 42.16 | Iodine: 121.57 | In temp range: True
 Condenser Temp: 66.7 °C | Condenser Speed: 5.34%
 [BORON] PPM: 3341.2 | PID Out: -1.23 | Dose: 0.0 | Filter: 1.2
 [IODINE AVG] 1.05 | Reactivity: 0.08 | Temp: 322.5
+
+## 🙏 Credits
+
+This project is a modified and extended fork of  
+[NuclearesController by GHXX](https://github.com/GHXX/NuclearesController)
+
+- Original author: **@GHXX**
+- License: MIT
+- Base logic, PID implementation, and foundational structure are derived from the original repository.
+
+Special thanks to the Nucleares developer(s) and community for building such a detailed simulation.
