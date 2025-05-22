@@ -227,12 +227,19 @@ internal class Program
                 // Update de laatst toegepaste positie voor de volgende iteratie
                 lastAppliedRodsPos = effectiveNewRodsPos;
 
-                // Bepaal adaptief het aantal banks dat moet bewegen op basis van de fout en de dynamicStepSize:
-                int banksToMove;
+                // Bepaal adaptief het aantal banks dat moet bewegen op basis van de fout, de dynamicStepSize én de mate waarin de reactiviteit negatief is:
+                float extraBanks = 0.0f;
+                if (avgReactivity < 0)
                 {
-                    banksToMove = Math.Max(1, (int)Math.Ceiling(errorVal / dynamicStepSize));
-                    banksToMove = Math.Min(banksToMove, Math.Min(rodCount, 9));
+                    // Hier bepaalt de multiplier hoeveel extra banks er worden opgeteld. 
+                    // Een multiplier van 10 betekent bijvoorbeeld dat bij een avgReactivity van -0.05
+                    // er extraBanks = 0.5 wordt, wat bij afronding een extra bank kan opleveren.
+                    float multiplier = 10.0f; // Pas deze waarde aan op basis van de gewenste gevoeligheid.
+                    extraBanks = -avgReactivity * multiplier;
                 }
+
+                int banksToMove = Math.Max(1, (int)Math.Ceiling((errorVal / dynamicStepSize) + extraBanks));
+                banksToMove = Math.Min(banksToMove, Math.Min(rodCount, 9));
 
                 // Nu de actuator voor de rodbanken
                 bool emergency = xenonTotal > 60 && temp < 300 && reactivity < 0;
