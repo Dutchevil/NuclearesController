@@ -46,7 +46,7 @@ internal class Program
 
     public static async Task<string> GetVariableRawAsync(string varname) =>
         await hc.GetStringAsync($"?variable={varname}", new CancellationTokenSource(requestTimeout).Token);
-    public static Dictionary<string, object> varCache = [];
+    public static Dictionary<string, object> varCache = new();
     public static async Task<T> GetVariableAsync<T>(string varname) where T : IParsable<T>
     {
         if (!varname.Equals("TIME_STAMP", StringComparison.InvariantCultureIgnoreCase) && varCache.TryGetValue(varname, out var rv))
@@ -118,6 +118,9 @@ internal class Program
             int setIntervalRemaining = 0;
             double lastRodSet = -1000;
 
+            // Stel de maximale foutdrempel in waarvoor de volledige stap wordt bereikt:
+            const float maxErrorForFullStep = 1.0f; // Pas dit aan op basis van je systeem
+
             while (true)
             {
                 await WaitForNextTimeStepAsync();
@@ -138,7 +141,6 @@ internal class Program
 
                 float condenserTemp = await GetVariableAsync<float>("CONDENSER_TEMPERATURE");
                 string opMode = await GetVariableAsync<string>("CORE_OPERATION_MODE");
-
                 bool inTempRange = temp >= desiredTempMin && temp <= desiredTempMax;
 
                 // Bepaal desiredReactivity op basis van de temperatuur:
@@ -147,6 +149,7 @@ internal class Program
                 {
                     double missing = desiredTempMin - temp; // hoeveel onder desiredTempMin
                     double extraReact = (missing / reactivitySlopeLengthDegrees) * maxTargetReactivity;
+                    // We verhogen hier het maximum extrareactiviteit tot 1.0 (kun je aanpassen)
                     extraReact = Math.Min(Math.Max(extraReact, 0.0), 1.0);
                     desiredReactivity = targetReactivity + extraReact;
                 }
@@ -160,7 +163,6 @@ internal class Program
                 }
 
                 // poison override: force extra heat when xenon is high
-                // Omdat Math.Clamp niet beschikbaar is, gebruiken we Math.Min/Math.Max
                 {
                     double poisonBoost = Math.Min(Math.Max((xenonTotal - 50) / 10.0, 0), 1);
                     desiredReactivity += poisonBoost * 0.5;
@@ -177,28 +179,60 @@ internal class Program
                 if (!tempHighEnough && xenonTotal > 200f)
                     Warn("Xenon poisoning likely: temp too low for suppression.");
 
+                // Bereken de PID-uitgang
                 float newRodsPos = (float)reactivityToRodsPid.Step(currentTimestamp, desiredReactivity, reactivity);
 
-                // Quantisatie met accumulator
+                // Dynamische quantisatie met accumulator:
+                // Bereken eerst de ruwe waarde vanuit de PID-controller
                 float rawNewRodsPos = (float)reactivityToRodsPid.Step(currentTimestamp, desiredReactivity, reactivity);
-                if (lastAppliedRodsPos == 0)
-                    lastAppliedRodsPos = rawNewRodsPos;
 
+                // Initialiseer lastAppliedRodsPos als dit de eerste iteratie is
+                if (lastAppliedRodsPos == 0)
+                {
+                    lastAppliedRodsPos = rawNewRodsPos;
+                }
+
+                // Bereken het verschil tussen de ruwe PID-uitgang en de laatst toegepaste positie
                 float diff = rawNewRodsPos - lastAppliedRodsPos;
                 rodAdjustmentAccumulator += diff;
-                float stepSize = 0.1f;
-                int steps = (int)(rodAdjustmentAccumulator / stepSize);
-                float effectiveChange = steps * stepSize;
+
+                // Bereken de fout in de reactiviteit (hoeveel moet de gemiddelde reactivity stijgen naar desiredReactivity)
+                float errorVal = (float)(desiredReactivity - avgReactivity);
+                if (errorVal < 0)
+                    errorVal = 0;
+
+                // Bepaal een dynamische stapgrootte, lineair geschaald van 0.1 tot maximaal 1.0
+                float dynamicStepSize = 0.1f + ((errorVal / maxErrorForFullStep) * (1.0f - 0.1f));
+                dynamicStepSize = Math.Min(Math.Max(dynamicStepSize, 0.1f), 1.0f);
+
+                // Bereken het aantal volledige stappen dat in de accumulator zit op basis van de dynamische stapgrootte:
+                int steps = (int)(rodAdjustmentAccumulator / dynamicStepSize);
+                float effectiveChange = steps * dynamicStepSize;
+
+                // Als er geen volledige stap is maar er is wel verschil, forceren we een stap
                 if (steps == 0 && diff != 0)
                 {
-                    effectiveChange = diff > 0 ? stepSize : -stepSize;
-                    rodAdjustmentAccumulator = 0;
+                    effectiveChange = diff > 0 ? dynamicStepSize : -dynamicStepSize;
+                    rodAdjustmentAccumulator = 0;  // Reset de accumulator wanneer we forcerend bijstellen
                 }
+
+                // Bereken de effectieve nieuwe rodpositie en beperk deze tot de grenzen (bijv. 10% tot 100%)
                 float effectiveNewRodsPos = lastAppliedRodsPos + effectiveChange;
                 effectiveNewRodsPos = Math.Min(Math.Max(effectiveNewRodsPos, 10f), 100f);
+
+                // Pas de accumulator aan wanneer een volledige stap is toegepast
                 if (steps != 0)
                     rodAdjustmentAccumulator -= effectiveChange;
+
+                // Update de laatst toegepaste positie voor de volgende iteratie
                 lastAppliedRodsPos = effectiveNewRodsPos;
+
+                // Bepaal adaptief het aantal banks dat moet bewegen op basis van de fout en de dynamicStepSize:
+                int banksToMove;
+                {
+                    banksToMove = Math.Max(1, (int)Math.Ceiling(errorVal / dynamicStepSize));
+                    banksToMove = Math.Min(banksToMove, Math.Min(rodCount, 9));
+                }
 
                 // Nu de actuator voor de rodbanken
                 bool emergency = xenonTotal > 60 && temp < 300 && reactivity < 0;
@@ -215,19 +249,9 @@ internal class Program
                             await SetVariableAsync(rodVar, target.ToString("N1"));
                         }
                     }
-                    else if (!inTempRange || Math.Abs(reactivity - targetReactivity) > 0.05f)
+                    else if (!inTempRange || Math.Abs(reactivity - targetReactivity) > 0.10f)
                     {
-                        // Adaptive berekening van het aantal banks
-                        int banksToMove;
-                        {
-                            // Bepaal de error (hoeveel moet de gemiddelde reactivity stijgen) 
-                            float error = (float)(desiredReactivity - avgReactivity);
-                            if (error < 0)
-                                error = 0;
-                            banksToMove = Math.Max(1, (int)Math.Ceiling(error / 0.1f));
-                            banksToMove = Math.Min(banksToMove, Math.Min(rodCount, 9));
-                        }
-                        Info($"Avg Reactivity: {avgReactivity:N2}, Temp: {temp:N1} °C → Moving {banksToMove} bank(s). NewRodPos: {effectiveNewRodsPos:N1}");
+                        Info($"Avg Reactivity: {avgReactivity:N2}, Temp: {temp:N1} °C, dynamicStepSize: {dynamicStepSize:N2} → Moving {banksToMove} bank(s). NewRodPos: {effectiveNewRodsPos:N1}");
                         for (int i = 0; i < banksToMove; i++)
                         {
                             if (currentRodBankIndex >= rodCount || currentRodBankIndex > 8)
@@ -262,7 +286,7 @@ internal class Program
         catch (Exception ex)
         {
             Console.WriteLine(ex);
-            await Task.Delay(5_000);
+            await Task.Delay(5000);
             goto restart;
         }
     }
