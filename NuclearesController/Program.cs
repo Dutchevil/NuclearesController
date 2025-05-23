@@ -10,8 +10,8 @@ internal class Program
     private static HttpClient hc = new HttpClient() { BaseAddress = new($"http://localhost:{PORT}/") };
     private static readonly object logObj = new();
 
-    private const float desiredTempMin = 310;
-    private const float desiredTempMax = 360;
+    private const float desiredTempMin = 350;
+    private const float desiredTempMax = 380;
     private const double maxTargetReactivity = 4;
     private const double reactivitySlopeLengthDegrees = 15;
     private const float targetReactivity = 0.10f;
@@ -101,8 +101,26 @@ internal class Program
             await WaitForWebserverAvailableAsync();
             Console.Clear();
 
-            int rodCount = await GetVariableAsync<int>("RODS_QUANTITY");
-            double rodGainScale = 1.0 / Math.Min(rodCount, 9);
+            int bankCount = 0;
+            while (true)
+            {
+                try
+                {
+                    // Attempt to read the next bank’s actual position
+                    await GetVariableAsync<float>($"ROD_BANK_POS_{bankCount}_ACTUAL");
+                    bankCount++;
+                }
+                catch
+                {
+                    // Any failure means “no such bank” → stop counting
+                    break;
+                }
+            }
+            Info($"Detected installed rod banks: {bankCount}");  // one-time log
+
+            // Create an array to store the last commanded positions for each bank (we only consider up to 9 banks)
+            float[] lastCommandedPositions = new float[Math.Min(bankCount, 9)];
+            double rodGainScale = 1.0 / Math.Min(bankCount, 9);
 
             var reactivityToRodsPid = new PID(
                 1.5 * rodGainScale,
@@ -147,9 +165,8 @@ internal class Program
                 double desiredReactivity;
                 if (temp < desiredTempMin)
                 {
-                    double missing = desiredTempMin - temp; // how much below desired temperature minimum
+                    double missing = desiredTempMin - temp; // how much below minimum
                     double extraReact = (missing / reactivitySlopeLengthDegrees) * maxTargetReactivity;
-                    // Clamp the extra reactivity to a maximum of 1.0 (adjustable)
                     extraReact = Math.Min(Math.Max(extraReact, 0.0), 1.0);
                     desiredReactivity = targetReactivity + extraReact;
                 }
@@ -183,95 +200,93 @@ internal class Program
                 float newRodsPos = (float)reactivityToRodsPid.Step(currentTimestamp, desiredReactivity, reactivity);
 
                 // --- Start Dynamic Quantization Section ---
-                // Get the raw PID output:
                 float rawNewRodsPos = (float)reactivityToRodsPid.Step(currentTimestamp, desiredReactivity, reactivity);
 
-                // Initialize lastAppliedRodsPos on the first iteration:
                 if (lastAppliedRodsPos == 0)
                 {
                     lastAppliedRodsPos = rawNewRodsPos;
                 }
 
-                // Calculate the difference between the raw output and the last applied position:
                 float diff = rawNewRodsPos - lastAppliedRodsPos;
                 rodAdjustmentAccumulator += diff;
 
-                // Compute error between desired reactivity and average reactivity:
                 float errorVal = (float)(desiredReactivity - avgReactivity);
                 if (errorVal < 0)
                     errorVal = 0;
 
-                // Determine a dynamic step size, scaled linearly from 0.1 up to 1.0 based on error:
                 float dynamicStepSize = 0.1f + ((errorVal / maxErrorForFullStep) * (1.0f - 0.1f));
                 dynamicStepSize = Math.Min(Math.Max(dynamicStepSize, 0.1f), 1.0f);
 
-                // Calculate number of full steps in the accumulator based on dynamicStepSize:
                 int steps = (int)(rodAdjustmentAccumulator / dynamicStepSize);
                 float effectiveChange = steps * dynamicStepSize;
 
-                // If no full step is reached but there is a difference, force one step:
                 if (steps == 0 && diff != 0)
                 {
                     effectiveChange = diff > 0 ? dynamicStepSize : -dynamicStepSize;
                     rodAdjustmentAccumulator = 0;
                 }
 
-                // Calculate the new effective rod position and clamp it between 10% and 100%:
                 float effectiveNewRodsPos = lastAppliedRodsPos + effectiveChange;
                 effectiveNewRodsPos = Math.Min(Math.Max(effectiveNewRodsPos, 10f), 100f);
 
-                // Adjust accumulator if steps were applied:
                 if (steps != 0)
                     rodAdjustmentAccumulator -= effectiveChange;
 
-                // Update last applied rod position:
                 lastAppliedRodsPos = effectiveNewRodsPos;
                 // --- End Dynamic Quantization Section ---
 
                 // --- Dynamic Calculation for Number of Banks ---
-                // Here we calculate the baseline number of banks based on error and dynamic step size,
-                // then we add an extra corrective factor if the average reactivity is negative.
                 float extraBanks = 0.0f;
                 if (avgReactivity < 0)
                 {
-                    // The multiplier is a sensitivity factor. For example, a multiplier of 10 means that
-                    // an avgReactivity of -0.05 would yield extraBanks = 0.5.
-                    float multiplier = 10.0f; // Adjust this value for desired sensitivity.
+                    float multiplier = 10.0f; // Adjust for sensitivity
                     extraBanks = -avgReactivity * multiplier;
                 }
                 int baselineBanks = (int)Math.Ceiling(errorVal / dynamicStepSize);
                 int banksToMove = Math.Max(1, (int)Math.Ceiling(baselineBanks + extraBanks));
-                banksToMove = Math.Min(banksToMove, Math.Min(rodCount, 9));
+                banksToMove = Math.Min(banksToMove, Math.Min(bankCount, 9));
                 // --- End Dynamic Calculation for Number of Banks ---
 
-                // Now, the actuator for the rod banks:
+                // --- Actuator for the Rod Banks ---
+                float tolerance = 0.1f; // tolerance threshold
                 bool emergency = xenonTotal > 60 && temp < 300 && reactivity < 0;
-                if (rodCount > 0)
+                if (bankCount > 0)
                 {
                     if (emergency)
                     {
-                        for (int i = 0; i < Math.Min(rodCount, 9); i++)
+                        // In emergency mode, update all banks (up to maximum 9) using per–bank check.
+                        for (int i = 0; i < Math.Min(bankCount, 9); i++)
                         {
                             string rodVar = $"ROD_BANK_POS_{i}_ORDERED";
                             float currentPos = await GetVariableAsync<float>($"ROD_BANK_POS_{i}_ACTUAL");
                             float step = 1.0f; // fixed step in emergency mode
                             float target = MathF.Max(currentPos - step, 10f);
-                            await SetVariableAsync(rodVar, target.ToString("N1"));
+                            if (Math.Abs(lastCommandedPositions[i] - target) > tolerance)
+                            {
+                                await SetVariableAsync(rodVar, target.ToString("N1"));
+                                lastCommandedPositions[i] = target;
+                            }
                         }
                     }
                     else if (!inTempRange || Math.Abs(reactivity - targetReactivity) > 0.10f)
                     {
                         Info($"Avg Reactivity: {avgReactivity:N2}, Temp: {temp:N1} °C, dynamicStepSize: {dynamicStepSize:N2} → Moving {banksToMove} bank(s). NewRodPos: {effectiveNewRodsPos:N1}");
+                        // For the calculated number of banks, update only those banks whose last commanded value differs by more than the tolerance.
                         for (int i = 0; i < banksToMove; i++)
                         {
-                            if (currentRodBankIndex >= rodCount || currentRodBankIndex > 8)
+                            if (currentRodBankIndex >= bankCount || currentRodBankIndex > 8)
                                 currentRodBankIndex = 0;
-                            string rodVar = $"ROD_BANK_POS_{currentRodBankIndex}_ORDERED";
-                            await SetVariableAsync(rodVar, effectiveNewRodsPos.ToString("N1"));
-                            currentRodBankIndex = (currentRodBankIndex + 1) % Math.Min(rodCount, 9);
+                            if (Math.Abs(lastCommandedPositions[currentRodBankIndex] - effectiveNewRodsPos) > tolerance)
+                            {
+                                string rodVar = $"ROD_BANK_POS_{currentRodBankIndex}_ORDERED";
+                                await SetVariableAsync(rodVar, effectiveNewRodsPos.ToString("N1"));
+                                lastCommandedPositions[currentRodBankIndex] = effectiveNewRodsPos;
+                            }
+                            currentRodBankIndex = (currentRodBankIndex + 1) % Math.Min(bankCount, 9);
                         }
                     }
                 }
+                // --- End Actuator ---
 
                 // Condenser PID control:
                 float newCondenserSpeed = (float)condenserPumpSpeedPid.Step(currentTimestamp, desiredCondenserTemp, condenserTemp);
